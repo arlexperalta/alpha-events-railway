@@ -199,16 +199,25 @@ class AlphaEventsProBot:
             return TokenMetrics(symbol, 0, 0, 0, 0, 0, 1)
 
     async def get_optimal_token_advanced(self) -> Tuple[str, TokenMetrics]:
-        """Selección inteligente de token basada en análisis en tiempo real"""
+        """Selección inteligente SOLO de tokens Alpha Events"""
         try:
             current_hour = datetime.utcnow().hour
             best_token = None
             best_score = 0
             best_metrics = None
             
+            # SOLO tokens Alpha Events - verificación explícita
+            alpha_symbols = list(self.alpha_tokens.keys())
+            self.logger.info(f"Analyzing ONLY Alpha Events tokens: {alpha_symbols}")
+            
             # Analizar todos los tokens Alpha Events
-            for symbol in self.alpha_tokens.keys():
+            for symbol in alpha_symbols:
                 try:
+                    # Verificar que el símbolo esté en la lista Alpha
+                    if symbol not in self.alpha_tokens:
+                        self.logger.warning(f"Skipping {symbol} - not in Alpha Events list")
+                        continue
+                        
                     metrics = await self.analyze_token_metrics(symbol)
                     
                     # Calcular score compuesto
@@ -235,30 +244,44 @@ class AlphaEventsProBot:
                         recent_success = self.token_performance[symbol].get('success_rate', 0)
                         score *= (1 + recent_success * 0.1)
                     
+                    self.logger.info(f"Token {symbol}: score {score:.2f}, points potential {metrics.alpha_points_potential}")
+                    
                     if score > best_score:
                         best_score = score
                         best_token = symbol
                         best_metrics = metrics
                         
-                    await asyncio.sleep(0.1)  # Rate limiting
+                    await asyncio.sleep(0.2)  # Rate limiting más conservador
                     
                 except Exception as e:
                     self.logger.warning(f"Could not analyze {symbol}: {str(e)}")
                     continue
             
-            if best_token:
-                self.logger.info(f"Selected {best_token} with score {best_score:.2f}")
+            if best_token and best_token in self.alpha_tokens:
+                self.logger.info(f"✅ Selected Alpha Events token: {best_token} with score {best_score:.2f}")
                 return best_token, best_metrics
             else:
-                # Fallback a token confiable
-                fallback = 'LIGHTUSDT'
-                metrics = await self.analyze_token_metrics(fallback)
-                return fallback, metrics
+                # Fallback SOLO a tokens Alpha Events
+                fallback_tokens = ['LIGHTUSDT', 'RIVERUSDT', 'BLESSUSDT']
+                for fallback in fallback_tokens:
+                    if fallback in self.alpha_tokens:
+                        self.logger.warning(f"⚠️ Using fallback Alpha token: {fallback}")
+                        try:
+                            metrics = await self.analyze_token_metrics(fallback)
+                            return fallback, metrics
+                        except:
+                            continue
+                
+                # Si todo falla, usar el primero de la lista
+                first_alpha = list(self.alpha_tokens.keys())[0]
+                self.logger.error(f"🚨 Emergency fallback to: {first_alpha}")
+                return first_alpha, TokenMetrics(first_alpha, 0, 0, 0, 0, 50, 3)
                 
         except Exception as e:
-            self.logger.error(f"Error in token selection: {str(e)}")
-            # Fallback final
-            return 'LIGHTUSDT', TokenMetrics('LIGHTUSDT', 0, 0, 0, 0, 50, 3)
+            self.logger.error(f"Error in Alpha token selection: {str(e)}")
+            # Fallback final solo Alpha Events
+            emergency_token = 'LIGHTUSDT'
+            return emergency_token, TokenMetrics(emergency_token, 0, 0, 0, 0, 50, 3)
 
     async def execute_smart_arbitrage(self, symbol: str, metrics: TokenMetrics, volume: float) -> Dict:
         """Ejecuta arbitraje inteligente con timing optimizado"""
@@ -690,7 +713,114 @@ async def analyze_all_tokens():
             "error": str(e)
         }
 
-@app.get("/test-binance-connection")
+@app.get("/check-alpha-tokens")
+async def check_alpha_tokens():
+    """Verificar disponibilidad de tokens Alpha Events en Binance"""
+    try:
+        available_tokens = []
+        unavailable_tokens = []
+        
+        for symbol in bot.alpha_tokens.keys():
+            try:
+                # Verificar si el símbolo existe en Binance
+                ticker = await bot._make_request('GET', '/api/v3/ticker/24hr', {'symbol': symbol})
+                exchange_info = await bot._make_request('GET', '/api/v3/exchangeInfo', {'symbol': symbol})
+                
+                if ticker and exchange_info:
+                    symbol_info = exchange_info['symbols'][0]
+                    is_trading = symbol_info['status'] == 'TRADING'
+                    
+                    available_tokens.append({
+                        'symbol': symbol,
+                        'status': symbol_info['status'],
+                        'is_trading': is_trading,
+                        'volume_24h': float(ticker['quoteVolume']),
+                        'price_change': float(ticker['priceChangePercent']),
+                        'tier': bot.alpha_tokens[symbol]['tier'],
+                        'base_points': bot.alpha_tokens[symbol]['base_points']
+                    })
+                else:
+                    unavailable_tokens.append(symbol)
+                    
+                await asyncio.sleep(0.1)  # Rate limiting
+                
+            except Exception as e:
+                unavailable_tokens.append({
+                    'symbol': symbol,
+                    'error': str(e)
+                })
+        
+        return {
+            "status": "success",
+            "total_alpha_tokens": len(bot.alpha_tokens),
+            "available_count": len(available_tokens),
+            "unavailable_count": len(unavailable_tokens),
+            "available_tokens": available_tokens,
+            "unavailable_tokens": unavailable_tokens,
+            "recommendation": available_tokens[0]['symbol'] if available_tokens else "No Alpha tokens available"
+        }
+        
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e)
+        }
+
+@app.post("/force-alpha-token")
+async def force_alpha_token(token_symbol: str = "LIGHTUSDT"):
+    """Forzar uso de un token Alpha Events específico"""
+    try:
+        # Verificar que sea un token Alpha Events válido
+        if token_symbol not in bot.alpha_tokens:
+            return {
+                "status": "error",
+                "error": f"{token_symbol} no es un token Alpha Events válido",
+                "valid_tokens": list(bot.alpha_tokens.keys())
+            }
+        
+        # Verificar disponibilidad en Binance
+        ticker = await bot._make_request('GET', '/api/v3/ticker/24hr', {'symbol': token_symbol})
+        exchange_info = await bot._make_request('GET', '/api/v3/exchangeInfo', {'symbol': token_symbol})
+        
+        if not ticker or not exchange_info:
+            return {
+                "status": "error",
+                "error": f"{token_symbol} no disponible en Binance"
+            }
+        
+        symbol_info = exchange_info['symbols'][0]
+        if symbol_info['status'] != 'TRADING':
+            return {
+                "status": "error",
+                "error": f"{token_symbol} no está en estado TRADING (actual: {symbol_info['status']})"
+            }
+        
+        # Intentar ejecutar un trade con este token
+        if not bot.should_trade():
+            return {
+                "status": "error",
+                "error": "Sistema no puede operar - límites alcanzados",
+                "daily_stats": asdict(bot.daily_stats)
+            }
+        
+        # Ejecutar trade forzado
+        metrics = await bot.analyze_token_metrics(token_symbol)
+        cycle_volume = min(bot.get_dynamic_volume(), 15)  # Volumen conservador para test
+        
+        result = await bot.execute_smart_arbitrage(token_symbol, metrics, cycle_volume)
+        
+        return {
+            "status": "success",
+            "message": f"Trade ejecutado exitosamente con {token_symbol}",
+            "result": result,
+            "token_info": bot.alpha_tokens[token_symbol]
+        }
+        
+    except Exception as e:
+        return {
+            "status": "error", 
+            "error": str(e)
+        }
 async def test_binance_connection():
     """Test de conexión mejorado con Binance"""
     try:
@@ -1045,6 +1175,12 @@ async def get_dashboard():
                 <button class="button info" onclick="analyzeTokens()">
                     📈 Analizar Tokens
                 </button>
+                <button class="button info" onclick="checkAlphaTokens()">
+                    🪙 Verificar Alpha Tokens
+                </button>
+                <button class="button success" onclick="forceAlphaToken()">
+                    ⚡ Forzar Token Alpha
+                </button>
             </div>
             
             <div id="logs" class="logs">
@@ -1195,8 +1331,95 @@ async def get_dashboard():
             }} catch (error) {{
                 logContent.innerHTML = `❌ <strong>Error:</strong> ${{error.message}}`;
             }}
+        async function checkAlphaTokens() {{
+            const logContent = document.getElementById('logContent');
+            const logs = document.getElementById('logs');
+            
+            logs.style.display = 'block';
+            logContent.innerHTML = '🪙 Verificando tokens Alpha Events en Binance...';
+            
+            try {{
+                const response = await fetch('/check-alpha-tokens');
+                const result = await response.json();
+                
+                if (result.status === 'success') {{
+                    let tokenList = '';
+                    result.available_tokens.forEach(token => {{
+                        const statusEmoji = token.is_trading ? '✅' : '❌';
+                        tokenList += `
+                            ${{statusEmoji}} <strong>${{token.symbol}}</strong> (Tier ${{token.tier}})<br>
+                            📊 Volumen 24h: ${{token.volume_24h?.toLocaleString()}}<br>
+                            📈 Cambio: ${{token.price_change?.toFixed(2)}}%<br>
+                            ⭐ Puntos base: ${{token.base_points}}<br><br>
+                        `;
+                    }});
+                    
+                    logContent.innerHTML = `
+                        ✅ <strong>Verificación de Alpha Tokens completada</strong><br><br>
+                        📊 <strong>Resumen:</strong><br>
+                        🪙 Total tokens Alpha: ${{result.total_alpha_tokens}}<br>
+                        ✅ Disponibles: ${{result.available_count}}<br>
+                        ❌ No disponibles: ${{result.unavailable_count}}<br>
+                        🏆 Recomendado: <strong>${{result.recommendation}}</strong><br><br>
+                        <strong>Tokens disponibles:</strong><br>
+                        ${{tokenList}}
+                    `;
+                    
+                    if (result.unavailable_tokens.length > 0) {{
+                        logContent.innerHTML += `
+                            <strong>⚠️ Tokens no disponibles:</strong><br>
+                            ${{result.unavailable_tokens.map(t => typeof t === 'string' ? t : `${{t.symbol}}: ${{t.error}}`).join('<br>')}}
+                        `;
+                    }}
+                }} else {{
+                    logContent.innerHTML = `❌ <strong>Error:</strong> ${{result.error}}`;
+                }}
+            }} catch (error) {{
+                logContent.innerHTML = `❌ <strong>Error:</strong> ${{error.message}}`;
+            }}
         }}
-        </script>
+        
+        async function forceAlphaToken() {{
+            const logContent = document.getElementById('logContent');
+            const logs = document.getElementById('logs');
+            
+            // Preguntar qué token usar
+            const token = prompt('¿Qué token Alpha Events quieres usar?\\n\\nOpciones:\\n- LIGHTUSDT (Tier 1)\\n- RIVERUSDT (Tier 1)\\n- BLESSUSDT (Tier 1)\\n- HANAUSDT (Tier 2)\\n- COAIUSDT (Tier 2)\\n- ASTERUSDT (Tier 2)\\n- AIXBTUSDT (Tier 3)\\n- MAGICUSDT (Tier 3)\\n- OMNIUSDT (Tier 3)', 'LIGHTUSDT');
+            
+            if (!token) return;
+            
+            logs.style.display = 'block';
+            logContent.innerHTML = `⚡ Forzando trade con ${{token}}...`;
+            
+            try {{
+                const response = await fetch(`/force-alpha-token?token_symbol=${{token}}`, {{
+                    method: 'POST'
+                }});
+                const result = await response.json();
+                
+                if (result.status === 'success') {{
+                    const r = result.result;
+                    logContent.innerHTML = `
+                        ✅ <strong>Trade forzado exitoso con ${{token}}</strong><br><br>
+                        🪙 <strong>Token:</strong> ${{token}} (Tier ${{result.token_info.tier}})<br>
+                        ⭐ <strong>Puntos base:</strong> ${{result.token_info.base_points}}<br><br>
+                        💰 <strong>Volumen generado:</strong> ${{r.volume_generated?.toFixed(2)}}<br>
+                        📊 <strong>P&L:</strong> ${{r.net_pnl?.toFixed(4)}}<br>
+                        ⭐ <strong>Puntos estimados:</strong> +${{r.estimated_points}}<br>
+                        📈 <strong>Volumen diario:</strong> ${{r.daily_volume?.toFixed(2)}}<br>
+                        🏆 <strong>Puntos totales:</strong> ${{r.daily_points}}
+                    `;
+                    setTimeout(() => window.location.reload(), 3000);
+                }} else {{
+                    logContent.innerHTML = `❌ <strong>Error:</strong> ${{result.error}}<br><br>`;
+                    if (result.valid_tokens) {{
+                        logContent.innerHTML += `💡 <strong>Tokens válidos:</strong> ${{result.valid_tokens.join(', ')}}`;
+                    }}
+                }}
+            }} catch (error) {{
+                logContent.innerHTML = `❌ <strong>Error:</strong> ${{error.message}}`;
+            }}
+        }}
     </body>
     </html>
     """
