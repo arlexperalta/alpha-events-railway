@@ -138,8 +138,19 @@ class AlphaEventsBot:
             # Calcular cantidad
             quantity = target_volume / current_price
             
-            # Ajustar cantidad según filtros del símbolo
-            quantity = round(quantity, 6)  # Simplificado
+            # Obtener filtros del símbolo para cantidad mínima
+            exchange_info = await self._make_request('GET', '/api/v3/exchangeInfo', {'symbol': symbol})
+            filters = exchange_info['symbols'][0]['filters']
+
+            # Encontrar LOT_SIZE filter
+            lot_size_filter = next(f for f in filters if f['filterType'] == 'LOT_SIZE')
+            min_qty = float(lot_size_filter['minQty'])
+            step_size = float(lot_size_filter['stepSize'])
+
+            # Ajustar cantidad según filtros
+            quantity = max(quantity, min_qty)
+            quantity = round(quantity / step_size) * step_size
+            quantity = round(quantity, 8)
             
             self.logger.info(f"Executing volume cycle: {symbol} ${target_volume}")
             
@@ -544,7 +555,7 @@ async def automatic_trading():
             if bot.should_trade():
                 symbol = await bot.get_optimal_token()
                 remaining = DAILY_VOLUME_TARGET - bot.daily_stats.volume
-                cycle_volume = min(remaining, 20)
+                cycle_volume = min(remaining, 50)
                 
                 if cycle_volume > 5:  # Mínimo $5 por ciclo
                     await bot.execute_volume_cycle(symbol, cycle_volume)
@@ -562,3 +573,4 @@ async def start_automatic_trading():
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=PORT)
+
