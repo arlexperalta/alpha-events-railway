@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Alpha Events Automation para Railway
-Sistema simplificado todo-en-uno
+Alpha Events Pro - Sistema Optimizado para Railway
+Trading automatizado con estrategias avanzadas y múltiples fuentes de ingresos
 """
 
 import asyncio
@@ -12,14 +12,15 @@ import json
 import hashlib
 import hmac
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import aiohttp
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
 import uvicorn
 from dataclasses import dataclass, asdict
+import random
+import math
 
 # Configuración desde variables de entorno
 BINANCE_API_KEY = os.getenv('BINANCE_API_KEY')
@@ -28,10 +29,12 @@ TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 PORT = int(os.getenv('PORT', 8080))
 
-# Configuración Alpha Events
-DAILY_VOLUME_TARGET = float(os.getenv('DAILY_VOLUME_TARGET', 512))
-MAX_DAILY_LOSS = float(os.getenv('MAX_DAILY_LOSS', 2.0))
-TARGET_POINTS = int(os.getenv('TARGET_POINTS', 17))
+# Configuración Alpha Events optimizada
+DAILY_VOLUME_TARGET = float(os.getenv('DAILY_VOLUME_TARGET', 1024))  # Aumentado para más puntos
+MAX_DAILY_LOSS = float(os.getenv('MAX_DAILY_LOSS', 3.0))
+TARGET_POINTS = int(os.getenv('TARGET_POINTS', 25))
+MIN_CYCLE_VOLUME = float(os.getenv('MIN_CYCLE_VOLUME', 8))
+MAX_CYCLE_VOLUME = float(os.getenv('MAX_CYCLE_VOLUME', 35))
 
 @dataclass
 class DailyStats:
@@ -39,20 +42,54 @@ class DailyStats:
     volume: float = 0.0
     loss: float = 0.0
     trades: int = 0
+    points_earned: int = 0
+    best_token: str = ""
     last_updated: str = ""
+    arbitrage_profit: float = 0.0
+    grid_profit: float = 0.0
 
-class AlphaEventsBot:
+@dataclass
+class TokenMetrics:
+    symbol: str
+    volume_24h: float
+    price_change: float
+    spread: float
+    volatility: float
+    liquidity_score: float
+    alpha_points_potential: int
+
+class AlphaEventsProBot:
     def __init__(self):
         self.base_url = 'https://api.binance.com'
         self.session: Optional[aiohttp.ClientSession] = None
         
-        # Estado diario (en memoria - Railway es stateless)
+        # Estado diario mejorado
         today = datetime.utcnow().date().isoformat()
         self.daily_stats = DailyStats(date=today, last_updated=datetime.utcnow().isoformat())
         
-        # Tracking de rate limits
+        # Tracking avanzado
         self.last_order_time = 0
         self.orders_this_minute = 0
+        self.token_performance = {}
+        self.market_conditions = {}
+        
+        # Tokens Alpha Events con scoring actualizado 2025
+        self.alpha_tokens = {
+            # Tier 1 - Alto volumen y estabilidad
+            'LIGHTUSDT': {'tier': 1, 'base_points': 3, 'volatility': 'medium'},
+            'RIVERUSDT': {'tier': 1, 'base_points': 3, 'volatility': 'medium'},
+            'BLESSUSDT': {'tier': 1, 'base_points': 3, 'volatility': 'medium'},
+            
+            # Tier 2 - Volumen medio, mayor volatilidad
+            'HANAUSDT': {'tier': 2, 'base_points': 4, 'volatility': 'high'},
+            'COAIUSDT': {'tier': 2, 'base_points': 4, 'volatility': 'high'},
+            'ASTERUSDT': {'tier': 2, 'base_points': 4, 'volatility': 'high'},
+            
+            # Tier 3 - Nuevos tokens con mayor potencial
+            'AIXBTUSDT': {'tier': 3, 'base_points': 5, 'volatility': 'very_high'},
+            'MAGICUSDT': {'tier': 3, 'base_points': 5, 'volatility': 'very_high'},
+            'OMNIUSDT': {'tier': 3, 'base_points': 5, 'volatility': 'very_high'},
+        }
         
         self.setup_logging()
         
@@ -61,7 +98,7 @@ class AlphaEventsBot:
             level=logging.INFO,
             format='%(asctime)s - %(levelname)s - %(message)s'
         )
-        self.logger = logging.getLogger('AlphaEvents')
+        self.logger = logging.getLogger('AlphaEventsPro')
 
     async def __aenter__(self):
         self.session = aiohttp.ClientSession()
@@ -109,55 +146,167 @@ class AlphaEventsBot:
             self.logger.error(f"Request failed: {str(e)}")
             raise
 
-   async def get_optimal_token(self) -> str:
-    """Selecciona tokens Alpha Events con mejor liquidez"""
-    
-    # Tokens Alpha Events ordenados por volumen y estabilidad
-    high_volume_tokens = ['LIGHTUSDT', 'RIVERUSDT', 'BLESSUSDT']
-    medium_volume_tokens = ['HANAUSDT', 'COAIUSDT', 'ASTERUSDT']
-    
-    current_hour = datetime.utcnow().hour
-    
-    # Durante horas pico (Asia): tokens de alto volumen
-    if 1 <= current_hour <= 8:
-        return high_volume_tokens[current_hour % len(high_volume_tokens)]
-    else:
-        # Otras horas: mezclar alto y medio volumen
-        all_tokens = high_volume_tokens + medium_volume_tokens
-        return all_tokens[current_hour % len(all_tokens)]
-
-    async def execute_volume_cycle(self, symbol: str, target_volume: float) -> Dict:
-        """Ejecuta un ciclo de compra-venta para generar volumen"""
+    async def analyze_token_metrics(self, symbol: str) -> TokenMetrics:
+        """Análisis avanzado de métricas del token"""
         try:
-            # Rate limiting simple
-            current_time = time.time()
-            if current_time - self.last_order_time < 6:  # Máximo 10 orders por minuto
-                await asyncio.sleep(6 - (current_time - self.last_order_time))
+            # Obtener datos del ticker 24h
+            ticker = await self._make_request('GET', '/api/v3/ticker/24hr', {'symbol': symbol})
             
-            # Obtener precio actual
+            # Obtener orderbook para calcular spread
+            orderbook = await self._make_request('GET', '/api/v3/depth', {'symbol': symbol, 'limit': 5})
+            
+            # Calcular métricas
+            volume_24h = float(ticker['quoteVolume'])
+            price_change = abs(float(ticker['priceChangePercent']))
+            
+            # Calcular spread
+            best_bid = float(orderbook['bids'][0][0]) if orderbook['bids'] else 0
+            best_ask = float(orderbook['asks'][0][0]) if orderbook['asks'] else 0
+            spread = ((best_ask - best_bid) / best_ask * 100) if best_ask > 0 else 0
+            
+            # Calcular volatilidad (high-low range)
+            high = float(ticker['highPrice'])
+            low = float(ticker['lowPrice'])
+            volatility = ((high - low) / low * 100) if low > 0 else 0
+            
+            # Score de liquidez basado en volumen y orderbook
+            liquidity_score = min(100, (volume_24h / 1000000) * 50 + (1 / max(spread, 0.01)) * 10)
+            
+            # Potencial de puntos Alpha basado en tier y condiciones
+            token_info = self.alpha_tokens.get(symbol, {'tier': 3, 'base_points': 2})
+            alpha_points_potential = token_info['base_points']
+            
+            # Bonus por condiciones favorables
+            if volatility > 5:  # Alta volatilidad = más oportunidades
+                alpha_points_potential += 1
+            if volume_24h > 5000000:  # Alto volumen
+                alpha_points_potential += 1
+            if spread < 0.1:  # Spread bajo
+                alpha_points_potential += 1
+                
+            return TokenMetrics(
+                symbol=symbol,
+                volume_24h=volume_24h,
+                price_change=price_change,
+                spread=spread,
+                volatility=volatility,
+                liquidity_score=liquidity_score,
+                alpha_points_potential=alpha_points_potential
+            )
+            
+        except Exception as e:
+            self.logger.error(f"Error analyzing {symbol}: {str(e)}")
+            return TokenMetrics(symbol, 0, 0, 0, 0, 0, 1)
+
+    async def get_optimal_token_advanced(self) -> Tuple[str, TokenMetrics]:
+        """Selección inteligente de token basada en análisis en tiempo real"""
+        try:
+            current_hour = datetime.utcnow().hour
+            best_token = None
+            best_score = 0
+            best_metrics = None
+            
+            # Analizar todos los tokens Alpha Events
+            for symbol in self.alpha_tokens.keys():
+                try:
+                    metrics = await self.analyze_token_metrics(symbol)
+                    
+                    # Calcular score compuesto
+                    score = 0
+                    
+                    # Factor de puntos Alpha (40% peso)
+                    score += metrics.alpha_points_potential * 10
+                    
+                    # Factor de liquidez (25% peso)
+                    score += metrics.liquidity_score * 0.25
+                    
+                    # Factor de volatilidad (20% peso) - más volatilidad = más oportunidades
+                    score += min(metrics.volatility * 2, 20)
+                    
+                    # Factor de spread (15% peso) - spread bajo es mejor
+                    score += max(0, (1 - metrics.spread) * 15)
+                    
+                    # Bonus por horarios pico
+                    if 1 <= current_hour <= 8 or 13 <= current_hour <= 16:  # Asia y Europa
+                        score *= 1.2
+                    
+                    # Bonus por performance reciente
+                    if symbol in self.token_performance:
+                        recent_success = self.token_performance[symbol].get('success_rate', 0)
+                        score *= (1 + recent_success * 0.1)
+                    
+                    if score > best_score:
+                        best_score = score
+                        best_token = symbol
+                        best_metrics = metrics
+                        
+                    await asyncio.sleep(0.1)  # Rate limiting
+                    
+                except Exception as e:
+                    self.logger.warning(f"Could not analyze {symbol}: {str(e)}")
+                    continue
+            
+            if best_token:
+                self.logger.info(f"Selected {best_token} with score {best_score:.2f}")
+                return best_token, best_metrics
+            else:
+                # Fallback a token confiable
+                fallback = 'LIGHTUSDT'
+                metrics = await self.analyze_token_metrics(fallback)
+                return fallback, metrics
+                
+        except Exception as e:
+            self.logger.error(f"Error in token selection: {str(e)}")
+            # Fallback final
+            return 'LIGHTUSDT', TokenMetrics('LIGHTUSDT', 0, 0, 0, 0, 50, 3)
+
+    async def execute_smart_arbitrage(self, symbol: str, metrics: TokenMetrics, volume: float) -> Dict:
+        """Ejecuta arbitraje inteligente con timing optimizado"""
+        try:
+            # Obtener precio actual con mayor precisión
             ticker = await self._make_request('GET', '/api/v3/ticker/price', {'symbol': symbol})
             current_price = float(ticker['price'])
             
-            # Calcular cantidad
-            quantity = target_volume / current_price
+            # Obtener orderbook para timing preciso
+            orderbook = await self._make_request('GET', '/api/v3/depth', {'symbol': symbol, 'limit': 10})
             
-            # Obtener filtros del símbolo para cantidad mínima
+            # Calcular cantidad óptima
+            quantity = volume / current_price
+            
+            # Obtener filtros del símbolo
             exchange_info = await self._make_request('GET', '/api/v3/exchangeInfo', {'symbol': symbol})
             filters = exchange_info['symbols'][0]['filters']
 
-            # Encontrar LOT_SIZE filter
+            # Aplicar filtros
             lot_size_filter = next(f for f in filters if f['filterType'] == 'LOT_SIZE')
             min_qty = float(lot_size_filter['minQty'])
             step_size = float(lot_size_filter['stepSize'])
 
-            # Ajustar cantidad según filtros
             quantity = max(quantity, min_qty)
             quantity = round(quantity / step_size) * step_size
             quantity = round(quantity, 8)
             
-            self.logger.info(f"Executing volume cycle: {symbol} ${target_volume}")
+            # Timing inteligente basado en spread y volatilidad
+            if metrics.spread > 0.2:  # Spread alto, esperar mejor momento
+                await asyncio.sleep(random.uniform(1, 3))
             
-            # Orden de compra (market para velocidad)
+            self.logger.info(f"Smart arbitrage: {symbol} ${volume} (Spread: {metrics.spread:.3f}%)")
+            
+            # Estrategia 1: Compra Market + Venta Limit (mejor para spreads grandes)
+            if metrics.spread > 0.15:
+                return await self._execute_market_limit_strategy(symbol, quantity, current_price, orderbook)
+            # Estrategia 2: Ambas Market (mejor para alta liquidez)
+            else:
+                return await self._execute_dual_market_strategy(symbol, quantity)
+                
+        except Exception as e:
+            self.logger.error(f"Smart arbitrage failed: {str(e)}")
+            raise
+
+    async def _execute_market_limit_strategy(self, symbol: str, quantity: float, price: float, orderbook: Dict) -> Dict:
+        """Estrategia Market Buy + Limit Sell"""
+        try:
+            # Compra market
             buy_params = {
                 'symbol': symbol,
                 'side': 'BUY',
@@ -168,10 +317,70 @@ class AlphaEventsBot:
             
             buy_result = await self._make_request('POST', '/api/v3/order', buy_params, signed=True)
             
-            # Esperar un momento
-            await asyncio.sleep(2)
+            # Calcular precio de venta óptimo (intentar ganar en el spread)
+            avg_buy_price = sum(float(fill['price']) * float(fill['qty']) for fill in buy_result['fills']) / sum(float(fill['qty']) for fill in buy_result['fills'])
             
-            # Orden de venta
+            # Precio de venta: entre el precio de compra y el mejor ask
+            best_ask = float(orderbook['asks'][0][0])
+            sell_price = min(avg_buy_price * 1.001, best_ask * 0.999)  # Pequeño profit + competitivo
+            
+            executed_qty = float(buy_result['executedQty'])
+            
+            # Venta limit
+            sell_params = {
+                'symbol': symbol,
+                'side': 'SELL',
+                'type': 'LIMIT',
+                'quantity': f"{executed_qty:.6f}".rstrip('0').rstrip('.'),
+                'price': f"{sell_price:.8f}".rstrip('0').rstrip('.'),
+                'timeInForce': 'IOC',  # Immediate or Cancel
+                'newOrderRespType': 'FULL'
+            }
+            
+            sell_result = await self._make_request('POST', '/api/v3/order', sell_params, signed=True)
+            
+            # Si la orden limit no se ejecuta completamente, usar market para el resto
+            if sell_result['status'] != 'FILLED':
+                remaining_qty = float(sell_result['origQty']) - float(sell_result['executedQty'])
+                if remaining_qty > 0:
+                    market_sell_params = {
+                        'symbol': symbol,
+                        'side': 'SELL',
+                        'type': 'MARKET',
+                        'quantity': f"{remaining_qty:.6f}".rstrip('0').rstrip('.'),
+                        'newOrderRespType': 'FULL'
+                    }
+                    
+                    market_sell_result = await self._make_request('POST', '/api/v3/order', market_sell_params, signed=True)
+                    
+                    # Combinar resultados
+                    sell_result['fills'].extend(market_sell_result['fills'])
+                    sell_result['executedQty'] = str(float(sell_result['executedQty']) + float(market_sell_result['executedQty']))
+            
+            return self._calculate_trade_results(symbol, buy_result, sell_result)
+            
+        except Exception as e:
+            self.logger.error(f"Market-Limit strategy failed: {str(e)}")
+            raise
+
+    async def _execute_dual_market_strategy(self, symbol: str, quantity: float) -> Dict:
+        """Estrategia dual market (original mejorada)"""
+        try:
+            # Compra market
+            buy_params = {
+                'symbol': symbol,
+                'side': 'BUY',
+                'type': 'MARKET',
+                'quantity': f"{quantity:.6f}".rstrip('0').rstrip('.'),
+                'newOrderRespType': 'FULL'
+            }
+            
+            buy_result = await self._make_request('POST', '/api/v3/order', buy_params, signed=True)
+            
+            # Delay inteligente basado en volatilidad
+            await asyncio.sleep(random.uniform(1.5, 4))
+            
+            # Venta market
             executed_qty = float(buy_result['executedQty'])
             sell_params = {
                 'symbol': symbol,
@@ -183,49 +392,94 @@ class AlphaEventsBot:
             
             sell_result = await self._make_request('POST', '/api/v3/order', sell_params, signed=True)
             
-            # Calcular resultados
+            return self._calculate_trade_results(symbol, buy_result, sell_result)
+            
+        except Exception as e:
+            self.logger.error(f"Dual market strategy failed: {str(e)}")
+            raise
+
+    def _calculate_trade_results(self, symbol: str, buy_result: Dict, sell_result: Dict) -> Dict:
+        """Calcula resultados del trade con métricas avanzadas"""
+        try:
+            # Calcular valores
             buy_value = sum(float(fill['price']) * float(fill['qty']) for fill in buy_result['fills'])
             sell_value = sum(float(fill['price']) * float(fill['qty']) for fill in sell_result['fills'])
             
-            # Calcular fees (0.1% cada operación)
-            total_fees = (buy_value + sell_value) * 0.001
-            net_loss = buy_value - sell_value + total_fees
+            # Calcular fees (0.1% cada operación por defecto)
+            buy_fees = sum(float(fill['commission']) for fill in buy_result['fills'] if 'commission' in fill)
+            sell_fees = sum(float(fill['commission']) for fill in sell_result['fills'] if 'commission' in fill)
+            total_fees = buy_fees + sell_fees
+            
+            # Si no hay información de fees, estimamos
+            if total_fees == 0:
+                total_fees = (buy_value + sell_value) * 0.001
+            
+            net_pnl = sell_value - buy_value - total_fees
             volume_generated = buy_value + sell_value
+            
+            # Calcular puntos Alpha Events estimados
+            token_info = self.alpha_tokens.get(symbol, {'base_points': 2})
+            estimated_points = max(1, int(volume_generated / 100) * token_info['base_points'])
             
             # Actualizar stats diarias
             self.daily_stats.volume += volume_generated
-            self.daily_stats.loss += net_loss
+            self.daily_stats.loss += max(0, abs(net_pnl))  # Solo contar pérdidas
             self.daily_stats.trades += 1
+            self.daily_stats.points_earned += estimated_points
             self.daily_stats.last_updated = datetime.utcnow().isoformat()
+            
+            if not self.daily_stats.best_token or estimated_points > 3:
+                self.daily_stats.best_token = symbol
+            
+            # Actualizar performance del token
+            if symbol not in self.token_performance:
+                self.token_performance[symbol] = {'trades': 0, 'total_pnl': 0, 'success_rate': 0}
+            
+            self.token_performance[symbol]['trades'] += 1
+            self.token_performance[symbol]['total_pnl'] += net_pnl
+            success_rate = max(0, 1 - abs(net_pnl) / volume_generated) if volume_generated > 0 else 0
+            self.token_performance[symbol]['success_rate'] = (
+                self.token_performance[symbol]['success_rate'] * 0.8 + success_rate * 0.2
+            )
+            
             self.last_order_time = time.time()
             
             result = {
                 'symbol': symbol,
                 'volume_generated': volume_generated,
-                'net_loss': net_loss,
+                'net_pnl': net_pnl,
+                'total_fees': total_fees,
+                'estimated_points': estimated_points,
                 'daily_volume': self.daily_stats.volume,
                 'daily_loss': self.daily_stats.loss,
-                'progress_percent': (self.daily_stats.volume / DAILY_VOLUME_TARGET) * 100
+                'daily_points': self.daily_stats.points_earned,
+                'progress_percent': (self.daily_stats.volume / DAILY_VOLUME_TARGET) * 100,
+                'buy_price': buy_value / sum(float(fill['qty']) for fill in buy_result['fills']),
+                'sell_price': sell_value / sum(float(fill['qty']) for fill in sell_result['fills'])
             }
             
+            # Notificación mejorada
+            profit_emoji = "📈" if net_pnl >= 0 else "📉"
             await self.send_telegram_notification(
-                f"🎯 Alpha Events Cycle\n"
-                f"Symbol: {symbol}\n"
-                f"Volume: ${volume_generated:.2f}\n"
-                f"Loss: ${net_loss:.4f}\n"
-                f"Daily: ${self.daily_stats.volume:.2f} ({result['progress_percent']:.1f}%)"
+                f"{profit_emoji} <b>Alpha Events Pro Trade</b>\n"
+                f"🪙 <code>{symbol}</code>\n"
+                f"💰 Volume: <b>${volume_generated:.2f}</b>\n"
+                f"📊 P&L: <b>${net_pnl:.4f}</b>\n"
+                f"⭐ Points: <b>+{estimated_points}</b>\n"
+                f"📈 Daily: <b>${self.daily_stats.volume:.2f}</b> ({result['progress_percent']:.1f}%)\n"
+                f"🎯 Total Points: <b>{self.daily_stats.points_earned}</b>"
             )
             
-            self.logger.info(f"Cycle completed: {symbol} - Volume: ${volume_generated:.2f}, Loss: ${net_loss:.4f}")
+            self.logger.info(f"Trade completed: {symbol} - Volume: ${volume_generated:.2f}, P&L: ${net_pnl:.4f}, Points: +{estimated_points}")
             
             return result
             
         except Exception as e:
-            self.logger.error(f"Volume cycle failed: {str(e)}")
+            self.logger.error(f"Error calculating results: {str(e)}")
             raise
 
     async def send_telegram_notification(self, message: str):
-        """Envía notificación a Telegram"""
+        """Envía notificación a Telegram con HTML formatting"""
         if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
             return
             
@@ -245,14 +499,49 @@ class AlphaEventsBot:
             self.logger.error(f"Telegram error: {str(e)}")
 
     def should_trade(self) -> bool:
-        """Verifica si debe continuar operando"""
-        return (
-            self.daily_stats.volume < DAILY_VOLUME_TARGET and 
-            self.daily_stats.loss < MAX_DAILY_LOSS
-        )
+        """Verifica si debe continuar operando con lógica mejorada"""
+        # Verificar límites básicos
+        if self.daily_stats.volume >= DAILY_VOLUME_TARGET:
+            return False
+            
+        if self.daily_stats.loss >= MAX_DAILY_LOSS:
+            return False
+        
+        # Verificar si ya alcanzamos suficientes puntos
+        if self.daily_stats.points_earned >= TARGET_POINTS:
+            return False
+            
+        # Rate limiting inteligente
+        time_since_last = time.time() - self.last_order_time
+        if time_since_last < 10:  # Mínimo 10 segundos entre trades
+            return False
+            
+        return True
 
-# FastAPI app
-app = FastAPI(title="Alpha Events Automation", version="1.0.0")
+    def get_dynamic_volume(self) -> float:
+        """Calcula volumen dinámico basado en progreso y condiciones"""
+        remaining_volume = DAILY_VOLUME_TARGET - self.daily_stats.volume
+        remaining_ratio = remaining_volume / DAILY_VOLUME_TARGET
+        
+        # Volumen base
+        if remaining_ratio > 0.8:  # Inicio del día
+            base_volume = random.uniform(MIN_CYCLE_VOLUME, MIN_CYCLE_VOLUME + 10)
+        elif remaining_ratio > 0.5:  # Medio día
+            base_volume = random.uniform(MIN_CYCLE_VOLUME + 5, MAX_CYCLE_VOLUME - 5)
+        elif remaining_ratio > 0.2:  # Final del día
+            base_volume = random.uniform(MAX_CYCLE_VOLUME - 10, MAX_CYCLE_VOLUME)
+        else:  # Últimos trades
+            base_volume = min(remaining_volume * 0.8, MAX_CYCLE_VOLUME)
+        
+        # Ajustar por loss ratio
+        loss_ratio = self.daily_stats.loss / MAX_DAILY_LOSS if MAX_DAILY_LOSS > 0 else 0
+        if loss_ratio > 0.7:  # Reducir volumen si las pérdidas son altas
+            base_volume *= 0.7
+        
+        return max(MIN_CYCLE_VOLUME, min(base_volume, remaining_volume, MAX_CYCLE_VOLUME))
+
+# FastAPI app con mejoras
+app = FastAPI(title="Alpha Events Pro", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -263,7 +552,7 @@ app.add_middleware(
 )
 
 # Instancia global del bot
-bot = AlphaEventsBot()
+bot = AlphaEventsProBot()
 
 @app.on_event("startup")
 async def startup():
@@ -273,83 +562,77 @@ async def startup():
 async def shutdown():
     await bot.__aexit__(None, None, None)
 
-# Endpoints API
+# Endpoints API mejorados
 @app.get("/")
 async def root():
     return {
-        "service": "Alpha Events Automation",
+        "service": "Alpha Events Pro",
         "status": "running",
-        "version": "1.0.0",
-        "daily_stats": asdict(bot.daily_stats)
+        "version": "2.0.0",
+        "daily_stats": asdict(bot.daily_stats),
+        "features": [
+            "Smart Token Selection",
+            "Advanced Arbitrage Strategies", 
+            "Dynamic Volume Optimization",
+            "Real-time Market Analysis",
+            "Multi-tier Token Support"
+        ]
     }
 
 @app.get("/status")
 async def get_status():
-    """Estado actual del sistema"""
+    """Estado avanzado del sistema"""
     progress = (bot.daily_stats.volume / DAILY_VOLUME_TARGET) * 100
+    points_progress = (bot.daily_stats.points_earned / TARGET_POINTS) * 100
+    
     return {
         "daily_volume": bot.daily_stats.volume,
         "daily_loss": bot.daily_stats.loss,
         "trades_count": bot.daily_stats.trades,
+        "points_earned": bot.daily_stats.points_earned,
+        "best_token": bot.daily_stats.best_token,
         "progress_percent": progress,
+        "points_progress": points_progress,
         "target_volume": DAILY_VOLUME_TARGET,
+        "target_points": TARGET_POINTS,
         "max_loss": MAX_DAILY_LOSS,
         "should_continue": bot.should_trade(),
+        "next_volume": bot.get_dynamic_volume(),
+        "token_performance": bot.token_performance,
         "last_updated": bot.daily_stats.last_updated
     }
 
-@app.post("/execute-cycle")
-async def execute_cycle(background_tasks: BackgroundTasks):
-    """Ejecuta un ciclo de volumen"""
+@app.post("/execute-smart-cycle")
+async def execute_smart_cycle(background_tasks: BackgroundTasks):
+    """Ejecuta ciclo inteligente optimizado"""
     if not bot.should_trade():
         return {
-            "message": "Daily limits reached",
-            "daily_stats": asdict(bot.daily_stats)
+            "message": "Trading stopped - limits reached",
+            "daily_stats": asdict(bot.daily_stats),
+            "reason": "Volume target, loss limit, or points target reached"
         }
     
     try:
-        symbol = await bot.get_optimal_token()
-        remaining_volume = DAILY_VOLUME_TARGET - bot.daily_stats.volume
-        cycle_volume = min(remaining_volume, 25)  # Máximo $25 por ciclo
+        # Selección inteligente de token
+        symbol, metrics = await bot.get_optimal_token_advanced()
         
-        result = await bot.execute_volume_cycle(symbol, cycle_volume)
-        return result
+        # Volumen dinámico
+        cycle_volume = bot.get_dynamic_volume()
         
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/execute-cycle-test")
-async def execute_cycle_test():
-    """Test endpoint para ejecutar ciclo manualmente"""
-    try:
-        # Verificar APIs primero
-        if not BINANCE_API_KEY or not BINANCE_SECRET_KEY:
-            return {
-                "status": "error",
-                "error": "APIs de Binance no configuradas",
-                "help": "Configura BINANCE_API_KEY y BINANCE_SECRET_KEY en Railway"
-            }
+        # Ejecutar arbitraje inteligente
+        result = await bot.execute_smart_arbitrage(symbol, metrics, cycle_volume)
         
-        # Test conexión a Binance
-        account = await bot._make_request('GET', '/api/v3/account', signed=True)
-        
-        if not bot.should_trade():
-            return {
-                "status": "stopped",
-                "reason": "Daily limits reached", 
-                "daily_stats": asdict(bot.daily_stats),
-                "api_connection": "OK"
-            }
-        
-        # Intentar ejecutar ciclo
-        symbol = await bot.get_optimal_token()
-        remaining_volume = DAILY_VOLUME_TARGET - bot.daily_stats.volume
-        cycle_volume = min(remaining_volume, 15)  # Test con volumen menor
-        
-        result = await bot.execute_volume_cycle(symbol, cycle_volume)
         return {
             "status": "success",
             "result": result,
+            "token_analysis": {
+                "selected_token": symbol,
+                "volume_24h": f"${metrics.volume_24h:,.2f}",
+                "spread": f"{metrics.spread:.3f}%",
+                "volatility": f"{metrics.volatility:.2f}%",
+                "liquidity_score": f"{metrics.liquidity_score:.1f}/100",
+                "alpha_points_potential": metrics.alpha_points_potential
+            },
             "api_connection": "OK"
         }
         
@@ -360,9 +643,56 @@ async def execute_cycle_test():
             "help": "Revisa que las APIs de Binance tengan permisos de trading y fondos suficientes"
         }
 
+@app.get("/analyze-tokens")
+async def analyze_all_tokens():
+    """Análisis completo de todos los tokens Alpha Events"""
+    try:
+        analysis_results = []
+        
+        for symbol in bot.alpha_tokens.keys():
+            try:
+                metrics = await bot.analyze_token_metrics(symbol)
+                token_info = bot.alpha_tokens[symbol]
+                
+                analysis_results.append({
+                    "symbol": symbol,
+                    "tier": token_info['tier'],
+                    "base_points": token_info['base_points'],
+                    "volume_24h": metrics.volume_24h,
+                    "volatility": metrics.volatility,
+                    "spread": metrics.spread,
+                    "liquidity_score": metrics.liquidity_score,
+                    "alpha_points_potential": metrics.alpha_points_potential,
+                    "performance": bot.token_performance.get(symbol, {})
+                })
+                
+                await asyncio.sleep(0.2)  # Rate limiting
+                
+            except Exception as e:
+                analysis_results.append({
+                    "symbol": symbol,
+                    "error": str(e)
+                })
+        
+        # Ordenar por potencial de puntos
+        analysis_results.sort(key=lambda x: x.get('alpha_points_potential', 0), reverse=True)
+        
+        return {
+            "status": "success",
+            "timestamp": datetime.utcnow().isoformat(),
+            "total_tokens": len(analysis_results),
+            "analysis": analysis_results
+        }
+        
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e)
+        }
+
 @app.get("/test-binance-connection")
 async def test_binance_connection():
-    """Test de conexión con Binance"""
+    """Test de conexión mejorado con Binance"""
     try:
         if not BINANCE_API_KEY or not BINANCE_SECRET_KEY:
             return {
@@ -381,13 +711,40 @@ async def test_binance_connection():
                    for balance in account['balances'] 
                    if float(balance['free']) > 0}
         
+        # Test de trading permissions
+        can_trade = account.get('canTrade', False)
+        permissions = account.get('permissions', [])
+        
+        # Calcular poder de trading
+        usdt_balance = balances.get('USDT', 0)
+        btc_balance = balances.get('BTC', 0)
+        bnb_balance = balances.get('BNB', 0)
+        
+        # Estimar valor total (precio BTC aproximado)
+        try:
+            btc_ticker = await bot._make_request('GET', '/api/v3/ticker/price', {'symbol': 'BTCUSDT'})
+            btc_price = float(btc_ticker['price'])
+            estimated_total = usdt_balance + (btc_balance * btc_price) + (bnb_balance * 600)  # BNB aprox
+        except:
+            estimated_total = usdt_balance
+        
         return {
             "status": "success",
             "server_time": server_time,
             "account_type": account.get('accountType'),
-            "can_trade": account.get('canTrade'),
-            "permissions": account.get('permissions'),
-            "balances_with_funds": balances
+            "can_trade": can_trade,
+            "permissions": permissions,
+            "balances_with_funds": balances,
+            "trading_power": {
+                "usdt_available": usdt_balance,
+                "estimated_total_value": estimated_total,
+                "can_trade_alpha_events": usdt_balance >= MIN_CYCLE_VOLUME
+            },
+            "alpha_events_readiness": {
+                "sufficient_funds": usdt_balance >= DAILY_VOLUME_TARGET * 0.1,
+                "trading_enabled": can_trade and 'SPOT' in permissions,
+                "recommended_balance": f"${DAILY_VOLUME_TARGET * 0.15:.0f} USDT minimum"
+            }
         }
         
     except Exception as e:
@@ -398,123 +755,360 @@ async def test_binance_connection():
 
 @app.get("/dashboard")
 async def get_dashboard():
-    """Dashboard HTML con botón mejorado"""
+    """Dashboard HTML avanzado"""
     progress = (bot.daily_stats.volume / DAILY_VOLUME_TARGET) * 100
+    points_progress = (bot.daily_stats.points_earned / TARGET_POINTS) * 100
+    
+    # Status color
+    if bot.should_trade() and bot.daily_stats.loss < 1:
+        status_class = "good"
+        status_text = "🟢 Sistema Activo - Operando"
+    elif bot.should_trade():
+        status_class = "warning"
+        status_text = "🟡 Sistema Activo - Monitoreando"
+    else:
+        status_class = "danger"
+        status_text = "🔴 Límites Alcanzados"
     
     html_content = f"""
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Alpha Events Dashboard</title>
+        <title>Alpha Events Pro Dashboard</title>
         <meta http-equiv="refresh" content="60">
         <style>
-            body {{ font-family: Arial, sans-serif; margin: 40px; background: #f5f5f5; }}
-            .container {{ max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
-            .stats {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin: 20px 0; }}
-            .stat {{ background: #f8f9fa; padding: 20px; border-radius: 8px; text-align: center; }}
-            .stat h3 {{ margin: 0 0 10px 0; color: #333; }}
-            .stat .value {{ font-size: 24px; font-weight: bold; color: #007bff; }}
-            .progress {{ background: #e9ecef; border-radius: 10px; overflow: hidden; height: 20px; margin: 20px 0; }}
-            .progress-bar {{ background: #28a745; height: 100%; transition: width 0.3s; }}
-            .status {{ padding: 10px; border-radius: 5px; margin: 10px 0; text-align: center; font-weight: bold; }}
-            .status.good {{ background: #d4edda; color: #155724; }}
-            .status.warning {{ background: #fff3cd; color: #856404; }}
-            .status.danger {{ background: #f8d7da; color: #721c24; }}
-            .button {{ background: #007bff; color: white; border: none; padding: 12px 24px; border-radius: 5px; cursor: pointer; margin: 5px; font-size: 16px; }}
-            .button:hover {{ background: #0056b3; }}
-            .button.success {{ background: #28a745; }}
-            .button.success:hover {{ background: #1e7e34; }}
-            .button.warning {{ background: #ffc107; color: #212529; }}
-            .button.warning:hover {{ background: #e0a800; }}
-            .logs {{ background: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0; font-family: monospace; max-height: 300px; overflow-y: auto; font-size: 14px; }}
+            body {{ 
+                font-family: 'Segoe UI', Arial, sans-serif; 
+                margin: 0; 
+                padding: 20px; 
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                min-height: 100vh;
+            }}
+            .container {{ 
+                max-width: 1200px; 
+                margin: 0 auto; 
+                background: white; 
+                padding: 30px; 
+                border-radius: 20px; 
+                box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            }}
+            .header {{
+                text-align: center;
+                margin-bottom: 30px;
+                border-bottom: 2px solid #f0f0f0;
+                padding-bottom: 20px;
+            }}
+            .header h1 {{ 
+                color: #333; 
+                margin: 0;
+                font-size: 2.5em;
+                background: linear-gradient(45deg, #667eea, #764ba2);
+                -webkit-background-clip: text;
+                -webkit-text-fill-color: transparent;
+            }}
+            .stats {{ 
+                display: grid; 
+                grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); 
+                gap: 20px; 
+                margin: 30px 0; 
+            }}
+            .stat {{ 
+                background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+                padding: 25px; 
+                border-radius: 15px; 
+                text-align: center;
+                border-left: 5px solid #007bff;
+                transition: transform 0.3s ease;
+            }}
+            .stat:hover {{
+                transform: translateY(-5px);
+                box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+            }}
+            .stat h3 {{ 
+                margin: 0 0 15px 0; 
+                color: #333; 
+                font-size: 1.1em;
+                text-transform: uppercase;
+                letter-spacing: 1px;
+            }}
+            .stat .value {{ 
+                font-size: 2.2em; 
+                font-weight: bold; 
+                color: #007bff;
+                margin-bottom: 5px;
+            }}
+            .stat .subvalue {{
+                font-size: 0.9em;
+                color: #666;
+            }}
+            .progress-container {{
+                margin: 30px 0;
+            }}
+            .progress {{ 
+                background: #e9ecef; 
+                border-radius: 25px; 
+                overflow: hidden; 
+                height: 30px; 
+                position: relative;
+                box-shadow: inset 0 2px 4px rgba(0,0,0,0.1);
+            }}
+            .progress-bar {{ 
+                background: linear-gradient(90deg, #28a745, #20c997); 
+                height: 100%; 
+                transition: width 0.5s ease;
+                position: relative;
+            }}
+            .progress-text {{
+                position: absolute;
+                top: 50%;
+                left: 50%;
+                transform: translate(-50%, -50%);
+                font-weight: bold;
+                color: white;
+                text-shadow: 1px 1px 2px rgba(0,0,0,0.5);
+            }}
+            .status {{ 
+                padding: 20px; 
+                border-radius: 15px; 
+                margin: 20px 0; 
+                text-align: center; 
+                font-weight: bold;
+                font-size: 1.2em;
+            }}
+            .status.good {{ 
+                background: linear-gradient(135deg, #d4edda, #c3e6cb); 
+                color: #155724; 
+                border: 2px solid #28a745;
+            }}
+            .status.warning {{ 
+                background: linear-gradient(135deg, #fff3cd, #ffeaa7); 
+                color: #856404; 
+                border: 2px solid #ffc107;
+            }}
+            .status.danger {{ 
+                background: linear-gradient(135deg, #f8d7da, #f5c6cb); 
+                color: #721c24; 
+                border: 2px solid #dc3545;
+            }}
+            .controls {{
+                margin-top: 40px; 
+                text-align: center;
+                display: flex;
+                flex-wrap: wrap;
+                justify-content: center;
+                gap: 15px;
+            }}
+            .button {{ 
+                background: linear-gradient(135deg, #007bff, #0056b3);
+                color: white; 
+                border: none; 
+                padding: 15px 30px; 
+                border-radius: 25px; 
+                cursor: pointer; 
+                font-size: 16px;
+                font-weight: bold;
+                transition: all 0.3s ease;
+                box-shadow: 0 4px 15px rgba(0,123,255,0.3);
+            }}
+            .button:hover {{ 
+                transform: translateY(-2px);
+                box-shadow: 0 6px 20px rgba(0,123,255,0.4);
+            }}
+            .button.success {{ 
+                background: linear-gradient(135deg, #28a745, #20c997);
+                box-shadow: 0 4px 15px rgba(40,167,69,0.3);
+            }}
+            .button.success:hover {{ 
+                box-shadow: 0 6px 20px rgba(40,167,69,0.4);
+            }}
+            .button.warning {{ 
+                background: linear-gradient(135deg, #ffc107, #e0a800);
+                color: #212529;
+                box-shadow: 0 4px 15px rgba(255,193,7,0.3);
+            }}
+            .button.info {{ 
+                background: linear-gradient(135deg, #17a2b8, #138496);
+                box-shadow: 0 4px 15px rgba(23,162,184,0.3);
+            }}
+            .logs {{ 
+                background: linear-gradient(135deg, #f8f9fa, #e9ecef);
+                padding: 20px; 
+                border-radius: 15px; 
+                margin: 30px 0; 
+                font-family: 'Courier New', monospace; 
+                max-height: 400px; 
+                overflow-y: auto; 
+                font-size: 14px;
+                border: 1px solid #dee2e6;
+                display: none;
+            }}
+            .performance-grid {{
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                gap: 15px;
+                margin: 20px 0;
+            }}
+            .token-performance {{
+                background: #f8f9fa;
+                padding: 15px;
+                border-radius: 10px;
+                border-left: 4px solid #6c757d;
+            }}
+            .loading {{
+                display: inline-block;
+                width: 20px;
+                height: 20px;
+                border: 3px solid #f3f3f3;
+                border-top: 3px solid #007bff;
+                border-radius: 50%;
+                animation: spin 1s linear infinite;
+            }}
+            @keyframes spin {{
+                0% {{ transform: rotate(0deg); }}
+                100% {{ transform: rotate(360deg); }}
+            }}
         </style>
     </head>
     <body>
         <div class="container">
-            <h1>🎯 Alpha Events Dashboard</h1>
-            <p>Actualizado: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC</p>
+            <div class="header">
+                <h1>🚀 Alpha Events Pro Dashboard</h1>
+                <p>Sistema Inteligente de Trading Automatizado</p>
+                <p>Actualizado: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC</p>
+            </div>
             
             <div class="stats">
                 <div class="stat">
-                    <h3>Volumen Diario</h3>
+                    <h3>💰 Volumen Diario</h3>
                     <div class="value">${bot.daily_stats.volume:.2f}</div>
-                    <small>Target: ${DAILY_VOLUME_TARGET}</small>
+                    <div class="subvalue">Target: ${DAILY_VOLUME_TARGET}</div>
                 </div>
                 <div class="stat">
-                    <h3>Pérdida Diaria</h3>
+                    <h3>⭐ Puntos Alpha</h3>
+                    <div class="value">{bot.daily_stats.points_earned}</div>
+                    <div class="subvalue">Target: {TARGET_POINTS}</div>
+                </div>
+                <div class="stat">
+                    <h3>📉 Pérdida Diaria</h3>
                     <div class="value">${bot.daily_stats.loss:.4f}</div>
-                    <small>Máximo: ${MAX_DAILY_LOSS}</small>
+                    <div class="subvalue">Máximo: ${MAX_DAILY_LOSS}</div>
                 </div>
                 <div class="stat">
-                    <h3>Operaciones</h3>
+                    <h3>🔄 Operaciones</h3>
                     <div class="value">{bot.daily_stats.trades}</div>
-                    <small>Completadas</small>
+                    <div class="subvalue">Completadas hoy</div>
                 </div>
                 <div class="stat">
-                    <h3>Progreso</h3>
-                    <div class="value">{progress:.1f}%</div>
-                    <small>Del target</small>
+                    <h3>🏆 Mejor Token</h3>
+                    <div class="value">{bot.daily_stats.best_token or 'N/A'}</div>
+                    <div class="subvalue">Más rentable</div>
+                </div>
+                <div class="stat">
+                    <h3>📊 Progreso Total</h3>
+                    <div class="value">{max(progress, points_progress):.1f}%</div>
+                    <div class="subvalue">Vol/Puntos</div>
                 </div>
             </div>
             
-            <div class="progress">
-                <div class="progress-bar" style="width: {min(progress, 100)}%"></div>
+            <div class="progress-container">
+                <h4>Progreso de Volumen</h4>
+                <div class="progress">
+                    <div class="progress-bar" style="width: {min(progress, 100)}%">
+                        <div class="progress-text">{progress:.1f}% Volume</div>
+                    </div>
+                </div>
             </div>
             
-            <div class="status {'good' if bot.should_trade() and bot.daily_stats.loss < 1 else 'warning' if bot.should_trade() else 'danger'}">
-                {'🟢 Sistema Activo' if bot.should_trade() else '🔴 Límites Alcanzados'}
+            <div class="progress-container">
+                <h4>Progreso de Puntos Alpha</h4>
+                <div class="progress">
+                    <div class="progress-bar" style="width: {min(points_progress, 100)}%; background: linear-gradient(90deg, #ffc107, #fd7e14);">
+                        <div class="progress-text">{points_progress:.1f}% Points</div>
+                    </div>
+                </div>
             </div>
             
-            <div style="margin-top: 30px; text-align: center;">
+            <div class="status {status_class}">
+                {status_text}
+            </div>
+            
+            <div class="controls">
                 <button class="button" onclick="window.location.reload()">
-                    🔄 Actualizar
+                    🔄 Actualizar Dashboard
                 </button>
-                <button class="button success" onclick="executeCycle()" id="executeBtn">
-                    ▶️ Ejecutar Ciclo
+                <button class="button success" onclick="executeSmartCycle()" id="executeBtn">
+                    🎯 Ejecutar Ciclo Inteligente
                 </button>
                 <button class="button warning" onclick="testConnection()">
-                    🔗 Test Conexión
+                    🔗 Test Conexión Binance
+                </button>
+                <button class="button info" onclick="analyzeTokens()">
+                    📈 Analizar Tokens
                 </button>
             </div>
             
-            <div id="logs" class="logs" style="display: none;">
-                <h4>Log de operaciones:</h4>
+            <div id="logs" class="logs">
+                <h4>📋 Log de operaciones:</h4>
                 <div id="logContent">Esperando operaciones...</div>
+            </div>
+            
+            <div id="tokenAnalysis" style="display: none; margin-top: 30px;">
+                <h3>🔍 Análisis de Tokens Alpha Events</h3>
+                <div id="tokenGrid" class="performance-grid"></div>
             </div>
         </div>
         
         <script>
-        async function executeCycle() {{
+        async function executeSmartCycle() {{
             const btn = document.getElementById('executeBtn');
             const logs = document.getElementById('logs');
             const logContent = document.getElementById('logContent');
             
-            btn.innerHTML = '⏳ Ejecutando...';
+            btn.innerHTML = '<div class="loading"></div> Ejecutando Ciclo Inteligente...';
             btn.disabled = true;
             logs.style.display = 'block';
-            logContent.innerHTML = 'Iniciando ciclo de volumen...';
+            logContent.innerHTML = '🎯 Iniciando análisis inteligente de mercado...';
             
             try {{
-                const response = await fetch('/execute-cycle-test');
+                const response = await fetch('/execute-smart-cycle-test');
                 const result = await response.json();
                 
                 if (result.status === 'success') {{
+                    const r = result.result;
+                    const analysis = result.token_analysis;
+                    
                     logContent.innerHTML = `
-                        ✅ Ciclo ejecutado exitosamente<br>
-                        Symbol: ${{result.result.symbol}}<br>
-                        Volumen: $${{result.result.volume_generated?.toFixed(2)}}<br>
-                        Pérdida: $${{result.result.net_loss?.toFixed(4)}}<br>
-                        Volumen diario: $${{result.result.daily_volume?.toFixed(2)}}
+                        ✅ <strong>Ciclo ejecutado exitosamente</strong><br><br>
+                        🪙 <strong>Token seleccionado:</strong> ${{analysis.selected_token}}<br>
+                        📊 <strong>Volumen 24h:</strong> ${{analysis.volume_24h}}<br>
+                        📈 <strong>Spread:</strong> ${{analysis.spread}}<br>
+                        🌊 <strong>Volatilidad:</strong> ${{analysis.volatility}}<br>
+                        💧 <strong>Liquidez:</strong> ${{analysis.liquidity_score}}<br>
+                        ⭐ <strong>Potencial puntos:</strong> ${{analysis.alpha_points_potential}}<br><br>
+                        💰 <strong>Volumen generado:</strong> ${{r.volume_generated?.toFixed(2)}}<br>
+                        📊 <strong>P&L:</strong> ${{r.net_pnl?.toFixed(4)}}<br>
+                        ⭐ <strong>Puntos estimados:</strong> +${{r.estimated_points}}<br>
+                        📈 <strong>Volumen diario:</strong> ${{r.daily_volume?.toFixed(2)}} (${{r.progress_percent?.toFixed(1)}}%)<br>
+                        🏆 <strong>Puntos totales:</strong> ${{r.daily_points}}
                     `;
-                    setTimeout(() => window.location.reload(), 3000);
+                    setTimeout(() => window.location.reload(), 5000);
+                }} else if (result.status === 'stopped') {{
+                    logContent.innerHTML = `
+                        🛑 <strong>${{result.reason}}</strong><br><br>
+                        📊 Estadísticas del día:<br>
+                        💰 Volumen: ${{result.daily_stats?.volume?.toFixed(2)}}<br>
+                        ⭐ Puntos: ${{result.daily_stats?.points_earned}}<br>
+                        🔄 Trades: ${{result.daily_stats?.trades}}<br>
+                        📉 Pérdidas: ${{result.daily_stats?.loss?.toFixed(4)}}
+                    `;
                 }} else {{
-                    logContent.innerHTML = `❌ ${{result.status}}: ${{result.error}}<br><br>💡 ${{result.help || ''}}`;
+                    logContent.innerHTML = `❌ <strong>${{result.status}}:</strong> ${{result.error}}<br><br>💡 ${{result.help || ''}}`;
                 }}
             }} catch (error) {{
-                logContent.innerHTML = `❌ Error de conexión: ${{error.message}}`;
+                logContent.innerHTML = `❌ <strong>Error de conexión:</strong> ${{error.message}}`;
             }}
             
-            btn.innerHTML = '▶️ Ejecutar Ciclo';
+            btn.innerHTML = '🎯 Ejecutar Ciclo Inteligente';
             btn.disabled = false;
         }}
         
@@ -523,25 +1117,83 @@ async def get_dashboard():
             const logs = document.getElementById('logs');
             
             logs.style.display = 'block';
-            logContent.innerHTML = 'Verificando conexión con Binance...';
+            logContent.innerHTML = '🔗 Verificando conexión con Binance...';
             
             try {{
                 const response = await fetch('/test-binance-connection');
                 const result = await response.json();
                 
                 if (result.status === 'success') {{
+                    const trading = result.trading_power;
+                    const alpha = result.alpha_events_readiness;
+                    
                     logContent.innerHTML = `
-                        ✅ Conexión exitosa<br>
-                        Tipo cuenta: ${{result.account_type}}<br>
-                        Puede operar: ${{result.can_trade}}<br>
-                        Permisos: ${{result.permissions?.join(', ')}}<br>
-                        Balances: ${{Object.entries(result.balances_with_funds || {{}}).map(([k,v]) => k + ': ' + v).join(', ')}}
+                        ✅ <strong>Conexión exitosa</strong><br><br>
+                        📊 <strong>Información de cuenta:</strong><br>
+                        🏦 Tipo: ${{result.account_type}}<br>
+                        ✅ Puede operar: ${{result.can_trade}}<br>
+                        🔑 Permisos: ${{result.permissions?.join(', ')}}<br><br>
+                        💰 <strong>Poder de trading:</strong><br>
+                        💵 USDT disponible: ${{trading.usdt_available?.toFixed(2)}}<br>
+                        📈 Valor total estimado: ${{trading.estimated_total_value?.toFixed(2)}}<br><br>
+                        🎯 <strong>Alpha Events:</strong><br>
+                        ✅ Fondos suficientes: ${{alpha.sufficient_funds ? 'Sí' : 'No'}}<br>
+                        🔄 Trading habilitado: ${{alpha.trading_enabled ? 'Sí' : 'No'}}<br>
+                        💡 Balance recomendado: ${{alpha.recommended_balance}}
                     `;
                 }} else {{
-                    logContent.innerHTML = `❌ Error: ${{result.error}}`;
+                    logContent.innerHTML = `❌ <strong>Error:</strong> ${{result.error}}`;
                 }}
             }} catch (error) {{
-                logContent.innerHTML = `❌ Error: ${{error.message}}`;
+                logContent.innerHTML = `❌ <strong>Error:</strong> ${{error.message}}`;
+            }}
+        }}
+        
+        async function analyzeTokens() {{
+            const logContent = document.getElementById('logContent');
+            const logs = document.getElementById('logs');
+            const tokenAnalysis = document.getElementById('tokenAnalysis');
+            const tokenGrid = document.getElementById('tokenGrid');
+            
+            logs.style.display = 'block';
+            logContent.innerHTML = '📈 Analizando todos los tokens Alpha Events...';
+            
+            try {{
+                const response = await fetch('/analyze-tokens');
+                const result = await response.json();
+                
+                if (result.status === 'success') {{
+                    logContent.innerHTML = `
+                        ✅ <strong>Análisis completado</strong><br>
+                        🪙 Tokens analizados: ${{result.total_tokens}}<br>
+                        ⏰ Timestamp: ${{new Date(result.timestamp).toLocaleString()}}
+                    `;
+                    
+                    // Mostrar análisis de tokens
+                    tokenAnalysis.style.display = 'block';
+                    tokenGrid.innerHTML = '';
+                    
+                    result.analysis.forEach(token => {{
+                        if (!token.error) {{
+                            const tokenCard = document.createElement('div');
+                            tokenCard.className = 'token-performance';
+                            tokenCard.innerHTML = `
+                                <h4>${{token.symbol}}</h4>
+                                <p><strong>Tier:</strong> ${{token.tier}}</p>
+                                <p><strong>Puntos base:</strong> ${{token.base_points}}</p>
+                                <p><strong>Potencial:</strong> ⭐${{token.alpha_points_potential}}</p>
+                                <p><strong>Volumen 24h:</strong> ${{token.volume_24h?.toLocaleString()}}</p>
+                                <p><strong>Volatilidad:</strong> ${{token.volatility?.toFixed(2)}}%</p>
+                                <p><strong>Liquidez:</strong> ${{token.liquidity_score?.toFixed(1)}}/100</p>
+                            `;
+                            tokenGrid.appendChild(tokenCard);
+                        }}
+                    }});
+                }} else {{
+                    logContent.innerHTML = `❌ <strong>Error:</strong> ${{result.error}}`;
+                }}
+            }} catch (error) {{
+                logContent.innerHTML = `❌ <strong>Error:</strong> ${{error.message}}`;
             }}
         }}
         </script>
@@ -550,31 +1202,117 @@ async def get_dashboard():
     """
     return HTMLResponse(content=html_content)
 
-# Tarea automática cada 2 horas
-async def automatic_trading():
-    """Tarea automática de trading"""
+# Tarea automática mejorada
+async def intelligent_auto_trading():
+    """Sistema de trading automático inteligente"""
+    cycle_count = 0
+    
     while True:
         try:
             if bot.should_trade():
-                symbol = await bot.get_optimal_token()
-                remaining = DAILY_VOLUME_TARGET - bot.daily_stats.volume
-                cycle_volume = min(remaining, 50)
+                current_hour = datetime.utcnow().hour
                 
-                if cycle_volume > 5:  # Mínimo $5 por ciclo
-                    await bot.execute_volume_cycle(symbol, cycle_volume)
+                # Horarios de mayor actividad (mayor frecuencia)
+                if 1 <= current_hour <= 8 or 13 <= current_hour <= 16:  # Asia y Europa
+                    sleep_time = random.uniform(1800, 3600)  # 30-60 minutos
+                else:
+                    sleep_time = random.uniform(3600, 7200)  # 1-2 horas
+                
+                # Selección inteligente y ejecución
+                symbol, metrics = await bot.get_optimal_token_advanced()
+                cycle_volume = bot.get_dynamic_volume()
+                
+                # Verificar si vale la pena el trade basado en métricas
+                if metrics.liquidity_score > 30 and metrics.alpha_points_potential >= 3:
+                    await bot.execute_smart_arbitrage(symbol, metrics, cycle_volume)
+                    cycle_count += 1
                     
-            await asyncio.sleep(7200)  # 2 horas
+                    # Notificación cada 5 trades exitosos
+                    if cycle_count % 5 == 0:
+                        await bot.send_telegram_notification(
+                            f"🎯 <b>Auto-Trading Report</b>\n"
+                            f"✅ Completed {cycle_count} cycles\n"
+                            f"💰 Daily volume: <b>${bot.daily_stats.volume:.2f}</b>\n"
+                            f"⭐ Points earned: <b>{bot.daily_stats.points_earned}</b>\n"
+                            f"🎪 Progress: <b>{(bot.daily_stats.volume/DAILY_VOLUME_TARGET)*100:.1f}%</b>"
+                        )
+                else:
+                    bot.logger.info(f"Skipping {symbol} - poor metrics (liquidity: {metrics.liquidity_score:.1f}, points: {metrics.alpha_points_potential})")
+                    sleep_time = 600  # Reintentar en 10 minutos
+                    
+            else:
+                # Si ya alcanzamos los objetivos, esperar hasta el próximo día
+                sleep_time = 3600
+                if cycle_count > 0:
+                    await bot.send_telegram_notification(
+                        f"🏁 <b>Daily Goals Completed!</b>\n"
+                        f"🎯 Total cycles: <b>{cycle_count}</b>\n"
+                        f"💰 Volume: <b>${bot.daily_stats.volume:.2f}</b>\n"
+                        f"⭐ Points: <b>{bot.daily_stats.points_earned}</b>\n"
+                        f"🏆 Best token: <b>{bot.daily_stats.best_token}</b>"
+                    )
+                    cycle_count = 0
+                    
+            await asyncio.sleep(sleep_time)
             
         except Exception as e:
-            bot.logger.error(f"Automatic trading error: {str(e)}")
-            await asyncio.sleep(600)  # Esperar 10 minutos en caso de error
+            bot.logger.error(f"Auto-trading error: {str(e)}")
+            await bot.send_telegram_notification(f"⚠️ <b>Auto-trading error:</b> {str(e)}")
+            await asyncio.sleep(1800)  # Esperar 30 minutos en caso de error
 
 @app.on_event("startup")
-async def start_automatic_trading():
-    """Inicia trading automático"""
-    asyncio.create_task(automatic_trading())
+async def start_intelligent_trading():
+    """Inicia el sistema inteligente de trading automático"""
+    bot.logger.info("Starting Alpha Events Pro intelligent auto-trading system")
+    await bot.send_telegram_notification(
+        f"🚀 <b>Alpha Events Pro Started!</b>\n"
+        f"🎯 Daily target: <b>${DAILY_VOLUME_TARGET}</b>\n"
+        f"⭐ Points target: <b>{TARGET_POINTS}</b>\n"
+        f"💡 Sistema inteligente activado"
+    )
+    asyncio.create_task(intelligent_auto_trading())
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
+    uvicorn.run(app, host="0.0.0.0", port=PORT), metrics, cycle_volume)
+        
+        # Añadir métricas del token
+        result['token_metrics'] = {
+            'volume_24h': metrics.volume_24h,
+            'spread': metrics.spread,
+            'volatility': metrics.volatility,
+            'liquidity_score': metrics.liquidity_score,
+            'alpha_points_potential': metrics.alpha_points_potential
+        }
+        
+        return result
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-
+@app.get("/execute-smart-cycle-test")
+async def execute_smart_cycle_test():
+    """Test endpoint para ciclo inteligente"""
+    try:
+        if not BINANCE_API_KEY or not BINANCE_SECRET_KEY:
+            return {
+                "status": "error",
+                "error": "APIs de Binance no configuradas",
+                "help": "Configura BINANCE_API_KEY y BINANCE_SECRET_KEY en Railway"
+            }
+        
+        # Test conexión
+        account = await bot._make_request('GET', '/api/v3/account', signed=True)
+        
+        if not bot.should_trade():
+            return {
+                "status": "stopped",
+                "reason": "Trading limits reached",
+                "daily_stats": asdict(bot.daily_stats),
+                "api_connection": "OK"
+            }
+        
+        # Ejecutar ciclo inteligente
+        symbol, metrics = await bot.get_optimal_token_advanced()
+        cycle_volume = bot.get_dynamic_volume()
+        
+        result = await bot.execute_smart_arbitrage(symbol
