@@ -109,19 +109,22 @@ class AlphaEventsBot:
             self.logger.error(f"Request failed: {str(e)}")
             raise
 
-    async def get_optimal_token(self) -> str:
-        """Selecciona el mejor token para Alpha Events según la hora"""
-        current_hour = datetime.utcnow().hour
-        
-        # Tokens estables para menor slippage
-        stable_tokens = ['ADAUSDT', 'DOTUSDT', 'MATICUSDT']
-        
-        # Durante horas asiáticas, tokens con más volumen
-        if 1 <= current_hour <= 8:
-            high_volume_tokens = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT']
-            return high_volume_tokens[current_hour % len(high_volume_tokens)]
-        else:
-            return stable_tokens[current_hour % len(stable_tokens)]
+   async def get_optimal_token(self) -> str:
+    """Selecciona tokens Alpha Events con mejor liquidez"""
+    
+    # Tokens Alpha Events ordenados por volumen y estabilidad
+    high_volume_tokens = ['LIGHTUSDT', 'RIVERUSDT', 'BLESSUSDT']
+    medium_volume_tokens = ['HANAUSDT', 'COAIUSDT', 'ASTERUSDT']
+    
+    current_hour = datetime.utcnow().hour
+    
+    # Durante horas pico (Asia): tokens de alto volumen
+    if 1 <= current_hour <= 8:
+        return high_volume_tokens[current_hour % len(high_volume_tokens)]
+    else:
+        # Otras horas: mezclar alto y medio volumen
+        all_tokens = high_volume_tokens + medium_volume_tokens
+        return all_tokens[current_hour % len(all_tokens)]
 
     async def execute_volume_cycle(self, symbol: str, target_volume: float) -> Dict:
         """Ejecuta un ciclo de compra-venta para generar volumen"""
@@ -573,4 +576,5 @@ async def start_automatic_trading():
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=PORT)
+
 
