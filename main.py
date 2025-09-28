@@ -404,4 +404,25 @@ async def start_automatic_trading():
     asyncio.create_task(automatic_trading())
 
 if __name__ == "__main__":
+
     uvicorn.run(app, host="0.0.0.0", port=PORT)
+
+@app.get("/execute-cycle-manual")
+async def execute_cycle_manual():
+    """Ejecuta un ciclo manualmente via GET"""
+    if not bot.should_trade():
+        return {
+            "message": "Daily limits reached",
+            "daily_stats": asdict(bot.daily_stats)
+        }
+    
+    try:
+        symbol = await bot.get_optimal_token()
+        remaining_volume = DAILY_VOLUME_TARGET - bot.daily_stats.volume
+        cycle_volume = min(remaining_volume, 25)  # Máximo $25 por ciclo
+        
+        result = await bot.execute_volume_cycle(symbol, cycle_volume)
+        return result
+        
+    except Exception as e:
+        return {"error": str(e), "detail": "Revisa las APIs de Binance"}
