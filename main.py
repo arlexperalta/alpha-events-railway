@@ -308,43 +308,91 @@ async def execute_cycle(background_tasks: BackgroundTasks):
 async def execute_cycle_test():
     """Test endpoint para ejecutar ciclo manualmente"""
     try:
-        # Primero verificar que las APIs funcionan
+        # Verificar APIs primero
+        if not BINANCE_API_KEY or not BINANCE_SECRET_KEY:
+            return {
+                "status": "error",
+                "error": "APIs de Binance no configuradas",
+                "help": "Configura BINANCE_API_KEY y BINANCE_SECRET_KEY en Railway"
+            }
+        
+        # Test conexión a Binance
         account = await bot._make_request('GET', '/api/v3/account', signed=True)
         
         if not bot.should_trade():
             return {
                 "status": "stopped",
                 "reason": "Daily limits reached", 
-                "daily_stats": asdict(bot.daily_stats)
+                "daily_stats": asdict(bot.daily_stats),
+                "api_connection": "OK"
             }
         
         # Intentar ejecutar ciclo
         symbol = await bot.get_optimal_token()
         remaining_volume = DAILY_VOLUME_TARGET - bot.daily_stats.volume
-        cycle_volume = min(remaining_volume, 25)
+        cycle_volume = min(remaining_volume, 15)  # Test con volumen menor
         
         result = await bot.execute_volume_cycle(symbol, cycle_volume)
         return {
             "status": "success",
-            "result": result
+            "result": result,
+            "api_connection": "OK"
         }
         
     except Exception as e:
         return {
             "status": "error",
             "error": str(e),
-            "help": "Revisa que las APIs de Binance tengan permisos de trading"
+            "help": "Revisa que las APIs de Binance tengan permisos de trading y fondos suficientes"
+        }
+
+@app.get("/test-binance-connection")
+async def test_binance_connection():
+    """Test de conexión con Binance"""
+    try:
+        if not BINANCE_API_KEY or not BINANCE_SECRET_KEY:
+            return {
+                "status": "error",
+                "error": "APIs no configuradas"
+            }
+        
+        # Test básico
+        server_time = await bot._make_request('GET', '/api/v3/time')
+        
+        # Test con autenticación
+        account = await bot._make_request('GET', '/api/v3/account', signed=True)
+        
+        # Obtener balances principales
+        balances = {balance['asset']: float(balance['free']) 
+                   for balance in account['balances'] 
+                   if float(balance['free']) > 0}
+        
+        return {
+            "status": "success",
+            "server_time": server_time,
+            "account_type": account.get('accountType'),
+            "can_trade": account.get('canTrade'),
+            "permissions": account.get('permissions'),
+            "balances_with_funds": balances
+        }
+        
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e)
         }
 
 @app.get("/dashboard")
 async def get_dashboard():
-    """Dashboard HTML simple"""
+    """Dashboard HTML con botón mejorado"""
+    progress = (bot.daily_stats.volume / DAILY_VOLUME_TARGET) * 100
+    
     html_content = f"""
     <!DOCTYPE html>
     <html>
     <head>
         <title>Alpha Events Dashboard</title>
-        <meta http-equiv="refresh" content="30">
+        <meta http-equiv="refresh" content="60">
         <style>
             body {{ font-family: Arial, sans-serif; margin: 40px; background: #f5f5f5; }}
             .container {{ max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
@@ -358,6 +406,13 @@ async def get_dashboard():
             .status.good {{ background: #d4edda; color: #155724; }}
             .status.warning {{ background: #fff3cd; color: #856404; }}
             .status.danger {{ background: #f8d7da; color: #721c24; }}
+            .button {{ background: #007bff; color: white; border: none; padding: 12px 24px; border-radius: 5px; cursor: pointer; margin: 5px; font-size: 16px; }}
+            .button:hover {{ background: #0056b3; }}
+            .button.success {{ background: #28a745; }}
+            .button.success:hover {{ background: #1e7e34; }}
+            .button.warning {{ background: #ffc107; color: #212529; }}
+            .button.warning:hover {{ background: #e0a800; }}
+            .logs {{ background: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0; font-family: monospace; max-height: 300px; overflow-y: auto; font-size: 14px; }}
         </style>
     </head>
     <body>
@@ -383,29 +438,99 @@ async def get_dashboard():
                 </div>
                 <div class="stat">
                     <h3>Progreso</h3>
-                    <div class="value">{(bot.daily_stats.volume / DAILY_VOLUME_TARGET) * 100:.1f}%</div>
+                    <div class="value">{progress:.1f}%</div>
                     <small>Del target</small>
                 </div>
             </div>
             
             <div class="progress">
-                <div class="progress-bar" style="width: {min((bot.daily_stats.volume / DAILY_VOLUME_TARGET) * 100, 100)}%"></div>
+                <div class="progress-bar" style="width: {min(progress, 100)}%"></div>
             </div>
             
             <div class="status {'good' if bot.should_trade() and bot.daily_stats.loss < 1 else 'warning' if bot.should_trade() else 'danger'}">
                 {'🟢 Sistema Activo' if bot.should_trade() else '🔴 Límites Alcanzados'}
             </div>
             
-            <div style="margin-top: 30px;">
-                <button onclick="window.location.reload()" style="background: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer;">
+            <div style="margin-top: 30px; text-align: center;">
+                <button class="button" onclick="window.location.reload()">
                     🔄 Actualizar
                 </button>
-                <button onclick="fetch('/execute-cycle', {{method: 'POST'}}).then(() => window.location.reload())" 
-                        style="background: #28a745; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; margin-left: 10px;">
+                <button class="button success" onclick="executeCycle()" id="executeBtn">
                     ▶️ Ejecutar Ciclo
                 </button>
+                <button class="button warning" onclick="testConnection()">
+                    🔗 Test Conexión
+                </button>
+            </div>
+            
+            <div id="logs" class="logs" style="display: none;">
+                <h4>Log de operaciones:</h4>
+                <div id="logContent">Esperando operaciones...</div>
             </div>
         </div>
+        
+        <script>
+        async function executeCycle() {{
+            const btn = document.getElementById('executeBtn');
+            const logs = document.getElementById('logs');
+            const logContent = document.getElementById('logContent');
+            
+            btn.innerHTML = '⏳ Ejecutando...';
+            btn.disabled = true;
+            logs.style.display = 'block';
+            logContent.innerHTML = 'Iniciando ciclo de volumen...';
+            
+            try {{
+                const response = await fetch('/execute-cycle-test');
+                const result = await response.json();
+                
+                if (result.status === 'success') {{
+                    logContent.innerHTML = `
+                        ✅ Ciclo ejecutado exitosamente<br>
+                        Symbol: ${{result.result.symbol}}<br>
+                        Volumen: $${{result.result.volume_generated?.toFixed(2)}}<br>
+                        Pérdida: $${{result.result.net_loss?.toFixed(4)}}<br>
+                        Volumen diario: $${{result.result.daily_volume?.toFixed(2)}}
+                    `;
+                    setTimeout(() => window.location.reload(), 3000);
+                }} else {{
+                    logContent.innerHTML = `❌ ${{result.status}}: ${{result.error}}<br><br>💡 ${{result.help || ''}}`;
+                }}
+            }} catch (error) {{
+                logContent.innerHTML = `❌ Error de conexión: ${{error.message}}`;
+            }}
+            
+            btn.innerHTML = '▶️ Ejecutar Ciclo';
+            btn.disabled = false;
+        }}
+        
+        async function testConnection() {{
+            const logContent = document.getElementById('logContent');
+            const logs = document.getElementById('logs');
+            
+            logs.style.display = 'block';
+            logContent.innerHTML = 'Verificando conexión con Binance...';
+            
+            try {{
+                const response = await fetch('/test-binance-connection');
+                const result = await response.json();
+                
+                if (result.status === 'success') {{
+                    logContent.innerHTML = `
+                        ✅ Conexión exitosa<br>
+                        Tipo cuenta: ${{result.account_type}}<br>
+                        Puede operar: ${{result.can_trade}}<br>
+                        Permisos: ${{result.permissions?.join(', ')}}<br>
+                        Balances: ${{Object.entries(result.balances_with_funds || {{}}).map(([k,v]) => k + ': ' + v).join(', ')}}
+                    `;
+                }} else {{
+                    logContent.innerHTML = `❌ Error: ${{result.error}}`;
+                }}
+            }} catch (error) {{
+                logContent.innerHTML = `❌ Error: ${{error.message}}`;
+            }}
+        }}
+        </script>
     </body>
     </html>
     """
@@ -436,8 +561,4 @@ async def start_automatic_trading():
     asyncio.create_task(automatic_trading())
 
 if __name__ == "__main__":
-
     uvicorn.run(app, host="0.0.0.0", port=PORT)
-
-
-
